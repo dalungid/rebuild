@@ -27,9 +27,17 @@ Rebuild dari Laravel monolith ke modern **microservices architecture** dengan Ne
    - Unified via DominicEngineAPI (single integration point)
    
 2. **Payment System**
-   - Multiple gateways: Hokipay, QRIS, Akses Bayar
-   - Automated withdrawal: VIP Otomatis & GsPay
-   - Deposit & Withdraw management
+   - **Automated Deposit (PGA - Payment Gateway Automated):**
+     - QRIS with callback: GsPay & VIP Otomatis
+     - Auto-confirm via webhook callback
+   - **Manual Deposit (Admin Approval Required):**
+     - QRIS Manual
+     - Bank Transfer
+     - E-Wallet
+     - Pulsa
+   - **Automated Withdrawal:**
+     - VIP Otomatis
+     - GsPay
    
 3. **User Management**
    - User registration (no OTP required)
@@ -185,6 +193,10 @@ CREATE TABLE users (
   -- Status
   is_banned BOOLEAN DEFAULT FALSE,
   banned_reason TEXT,
+  
+  -- User Level & Permissions
+  user_level INT DEFAULT 0, -- 0=member, 1=superadmin, 2=finance, 3=CS, 4=CRM/promotor, 5=affiliate_member
+  affiliate_approved BOOLEAN DEFAULT FALSE, -- For level 5 (member with affiliate access)
   
   -- Referral
   referral_code VARCHAR(20) UNIQUE,
@@ -347,8 +359,71 @@ CREATE TABLE settings (
 
 -- Example settings data:
 -- key: 'payment.hokipay', value: { "api_key": "...", "secret": "...", "enabled": true }
+-- key: 'payment.pulsa_rate', value: 0.8  -- Pulsa conversion rate (0.1 - 1.0)
+-- key: 'payment.deposit_methods', value: {
+--   "qris_auto": { "enabled": true, "gateway": "gspay" },
+--   "qris_manual": { "enabled": true },
+--   "bank_transfer": { "enabled": true },
+--   "ewallet": { "enabled": false },
+--   "pulsa": { "enabled": true }
+-- }
+-- key: 'payment.auto_withdrawal_provider', value: "vipotomatis"  -- 'vipotomatis' or 'gspay'
 -- key: 'game.dominic_engine', value: { "agent_code": "...", "agent_token": "...", "url": "..." }
 -- key: 'website.name', value: "Gaming Platform"
+-- key: 'localization.default_language', value: "id"  -- Indonesian (id)
+
+-- ==================== PAYMENT ACCOUNTS (Manual Deposit) ====================
+CREATE TYPE payment_account_type AS ENUM ('bank', 'qris', 'ewallet', 'pulsa');
+
+CREATE TABLE payment_accounts (
+  id SERIAL PRIMARY KEY,
+  type payment_account_type NOT NULL,
+  
+  -- Common fields
+  name VARCHAR(100) NOT NULL, -- Display name: "BCA - ABCD", "OVO - Payment", dll
+  active BOOLEAN DEFAULT TRUE, -- On/Off toggle
+  sort_order INT DEFAULT 0, -- Display order
+  
+  -- For Bank
+  bank_name VARCHAR(50), -- BCA, Mandiri, BRI, BNI, dll
+  bank_code VARCHAR(10), -- Bank code
+  account_number VARCHAR(50),
+  account_holder VARCHAR(100),
+  
+  -- For QRIS Manual
+  qris_image_url TEXT, -- Static QRIS image
+  qris_code TEXT, -- QRIS string
+  
+  -- For E-Wallet
+  ewallet_provider VARCHAR(50), -- OVO, DANA, GoPay, LinkAja, dll
+  ewallet_number VARCHAR(50),
+  ewallet_name VARCHAR(100), -- Account holder name
+  
+  -- For Pulsa
+  pulsa_provider VARCHAR(50), -- Telkomsel, XL, Indosat, Tri, dll
+  pulsa_number VARCHAR(20),
+  pulsa_name VARCHAR(100), -- Account holder name
+  
+  -- Metadata
+  notes TEXT, -- Admin notes
+  created_by BIGINT REFERENCES admins(id),
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_payment_accounts_type ON payment_accounts(type);
+CREATE INDEX idx_payment_accounts_active ON payment_accounts(active);
+
+-- Example data:
+-- INSERT INTO payment_accounts (type, name, bank_name, account_number, account_holder, active) 
+-- VALUES ('bank', 'BCA - ABCD', 'BCA', '0123456', 'ABCD', true);
+-- 
+-- INSERT INTO payment_accounts (type, name, bank_name, account_number, account_holder, active) 
+-- VALUES ('bank', 'Mandiri - ABCD', 'Mandiri', '9876543', 'ABCD', false);
+--
+-- INSERT INTO payment_accounts (type, name, ewallet_provider, ewallet_number, ewallet_name, active)
+-- VALUES ('ewallet', 'OVO - Payment', 'OVO', '081234567890', 'Payment Account', true);
+
 
 -- ==================== ADMIN ====================
 CREATE TABLE admins (
@@ -447,7 +522,253 @@ queue:notifications                     → [job1, job2, ...]
 
 ---
 
-## 🔧 Microservices Detail
+## � User Levels & Permissions (RBAC)
+
+### User Level System
+
+The platform supports **6 user levels** with distinct permissions:
+
+| Level | Role | Panel Access | Description |
+|-------|------|--------------|-------------|
+| **0** | Member | Member Panel | Regular member, NO affiliate/referral access |
+| **1** | Superadmin | Admin Panel | Full access to all features |
+| **2** | Finance | Admin Panel | Limited to transactions, deposits, withdrawals, player data, CRM (can edit) |
+| **3** | CS (Customer Service) | Admin Panel | Similar to Finance but CRM is read-only |
+| **4** | CRM / Promotor | Admin Panel | Own CRM data only (NDP, REGIST, reports, downline, commission) - read-only |
+| **5** | Affiliate Member | Member Panel | Member + affiliate/referral features (NDP, REGIST, reports, downline, commission) |
+
+---
+
+### Level 0: Member (Regular)
+
+**Panel**: Member Panel  
+**Permissions**:
+- ✅ Deposit
+- ✅ Withdraw  
+- ✅ Play games
+- ✅ View transaction history
+- ✅ Update profile
+- ✅ Lucky draw
+- ❌ **NO** Affiliate/Referral features
+- ❌ **NO** Downline data
+- ❌ **NO** Commission tracking
+
+---
+
+### Level 1: Superadmin
+
+**Panel**: Admin Panel  
+**Permissions**: **FULL ACCESS** to all features
+
+- ✅ All transactions (deposit, withdrawal, approvals)
+- ✅ All user management (create, edit, delete, ban/unban)
+- ✅ All CRM features (view, edit, bonus settings)
+- ✅ Payment settings (payment accounts, methods, rates)
+- ✅ Game settings
+- ✅ Analytics & reports (all data)
+- ✅ Domain management
+- ✅ Admin management (create admins, set levels)
+- ✅ Settings (all categories)
+
+---
+
+### Level 2: Finance
+
+**Panel**: Admin Panel  
+**Access**: Limited to financial operations
+
+**Can Access:**
+- ✅ Transactions (all)
+- ✅ Deposits (view, approve, reject)
+- ✅ Withdrawals (view, approve, reject, choose disbursement method)
+- ✅ Transaction history
+- ✅ Player data (view user list, balances, bank info)
+- ✅ CRM data (view & **EDIT** - can set/edit CRM bonus)
+
+**Cannot Access:**
+- ❌ Game settings
+- ❌ Domain management
+- ❌ Admin management
+- ❌ Payment account management
+- ❌ Global settings
+
+---
+
+### Level 3: CS (Customer Service)
+
+**Panel**: Admin Panel  
+**Access**: Similar to Finance but more restricted
+
+**Can Access:**
+- ✅ Transactions (view only, cannot approve/reject)
+- ✅ Transaction history
+- ✅ Player data (view user list, balances, bank info)
+- ✅ CRM data (**READ-ONLY** - cannot edit)
+
+**Cannot Access:**
+- ❌ Approve/reject deposits
+- ❌ Approve/reject withdrawals
+- ❌ Edit CRM bonus
+- ❌ Game settings
+- ❌ Domain management
+- ❌ Admin management
+- ❌ Payment settings
+
+---
+
+### Level 4: CRM / Promotor
+
+**Panel**: Admin Panel (Limited)  
+**Access**: Own CRM data only
+
+**Can Access (Own Data Only):**
+- ✅ Own CRM dashboard
+  - NDP (New Deposit Players) count
+  - REGIST (New Registrations) count
+  - Daily/Weekly/Monthly reports
+- ✅ Own downline list (users referred by them)
+- ✅ Own commission data (earned commissions)
+- ✅ **READ-ONLY** - cannot edit anything
+
+**Cannot Access:**
+- ❌ Other promotors' data
+- ❌ All player data (except own downline)
+- ❌ Transactions
+- ❌ Deposits/Withdrawals
+- ❌ Any edit/create/delete operations
+
+**Report Access:**
+- Daily Report: Registrations, deposits, NDPs for today
+- Weekly Report: Same for last 7 days
+- Monthly Report: Same for last 30 days
+
+---
+
+### Level 5: Affiliate Member
+
+**Panel**: Member Panel (Enhanced)  
+**Access**: Member features + Affiliate/Referral system
+
+**Can Access:**
+- ✅ All Level 0 features (deposit, withdraw, play, etc.)
+- ✅ **Affiliate Dashboard:**
+  - NDP count
+  - REGIST count
+  - Daily/Weekly/Monthly reports
+- ✅ Downline list (users who used their referral code)
+- ✅ Commission tracking (earned commissions)
+- ✅ Referral code (unique code to share)
+- ✅ Claim commission (transfer referral_balance to main_balance)
+
+**Approval Required:**
+- User must have `affiliate_approved = true` to access affiliate features
+- Superadmin can approve/reject affiliate requests
+
+---
+
+### Permission Matrix
+
+| Feature | Level 0 | Level 1 | Level 2 | Level 3 | Level 4 | Level 5 |
+|---------|---------|---------|---------|---------|---------|---------|
+| **Member Panel** |
+| Deposit | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Withdraw | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Play Games | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Lucky Draw | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ |
+| Affiliate/Referral | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| **Admin Panel** |
+| Transactions View | ❌ | ✅ | ✅ | ✅ | ❌ | ❌ |
+| Approve Deposit | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Approve Withdrawal | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Player Data | ❌ | ✅ | ✅ | ✅ | Own only | ❌ |
+| CRM Data View | ❌ | ✅ | ✅ | ✅ | Own only | ❌ |
+| CRM Data Edit | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| Payment Settings | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Admin Management | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Domain Management | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+---
+
+### Implementation (RBAC Middleware)
+
+**Backend (NestJS Guards):**
+
+```typescript
+// auth/guards/level.guard.ts
+@Injectable()
+export class LevelGuard implements CanActivate {
+  constructor(private reflector: Reflector) {}
+  
+  canActivate(context: ExecutionContext): boolean {
+    const requiredLevels = this.reflector.get<number[]>('levels', context.getHandler());
+    if (!requiredLevels) return true;
+    
+    const request = context.switchToHttp().getRequest();
+    const user = request.user;
+    
+    return requiredLevels.includes(user.user_level);
+  }
+}
+
+// Usage in controllers
+@Controller('admin/transactions')
+@UseGuards(LevelGuard)
+export class TransactionsController {
+  
+  @Get()
+  @Levels(1, 2, 3) // Superadmin, Finance, CS can view
+  getTransactions() { }
+  
+  @Put(':id/approve')
+  @Levels(1, 2) // Only Superadmin and Finance can approve
+  approveTransaction() { }
+}
+
+// Custom decorator
+export const Levels = (...levels: number[]) => SetMetadata('levels', levels);
+```
+
+**Frontend (Next.js Route Protection):**
+
+```typescript
+// middleware.ts
+export function middleware(request: NextRequest) {
+  const user = getAuthUser(request);
+  
+  // Member panel routes
+  if (request.nextUrl.pathname.startsWith('/member')) {
+    if (![0, 5].includes(user.user_level)) {
+      return NextResponse.redirect('/admin');
+    }
+    
+    // Affiliate routes only for level 5
+    if (request.nextUrl.pathname.startsWith('/member/affiliate')) {
+      if (user.user_level !== 5 || !user.affiliate_approved) {
+        return NextResponse.redirect('/member');
+      }
+    }
+  }
+  
+  // Admin panel routes
+  if (request.nextUrl.pathname.startsWith('/admin')) {
+    if (![1, 2, 3, 4].includes(user.user_level)) {
+      return NextResponse.redirect('/member');
+    }
+    
+    // Check specific admin routes
+    if (request.nextUrl.pathname.startsWith('/admin/settings')) {
+      if (user.user_level !== 1) { // Only Superadmin
+        return NextResponse.redirect('/admin');
+      }
+    }
+  }
+}
+```
+
+---
+
+## �🔧 Microservices Detail
+
 
 ### 1. Auth Service
 
@@ -564,56 +885,368 @@ Game balance:       2 minutes (sync frequently)
 - Balance operations (atomic)
 - Transaction creation & updates
 
-**Payment Gateways:**
-- Hokipay (deposit)
-- QRIS - multiple providers (deposit)
-- Akses Bayar (deposit)
-- GsPay (deposit + automated withdrawal)
-- VIP Otomatis (automated withdrawal)
+**Payment Gateway Types:**
+
+**Automated Deposit (PGA with Callback):**
+- GsPay (QRIS automated with webhook callback)
+- VIP Otomatis (QRIS automated with webhook callback)
+- Auto-confirmation via callback
+- Instant balance top-up
+
+**Manual Deposit (Admin Approval):**
+- QRIS Manual (admin verify payment proof)
+- Bank Transfer (admin verify payment proof)
+- E-Wallet (admin verify payment proof)
+- Pulsa (admin verify payment proof) **with rate conversion**
+  - Admin can set pulsa rate (0.1 - 1.0)
+  - Example: Rate 0.8 → 100k pulsa = 80k balance
+  - Example: Rate 1.0 → 100k pulsa = 100k balance (full)
+
+**Automated Withdrawal:**
+- VIP Otomatis
+- GsPay
 
 **API Endpoints:**
 ```typescript
-POST   /payment/deposit/initiate         // Initiate deposit
-POST   /payment/withdraw/initiate        // Initiate withdrawal
-POST   /payment/callback/hokipay         // Hokipay webhook
+// Automated Deposits (PGA)
+POST   /payment/deposit/automated        // Initiate automated deposit (QRIS)
+POST   /payment/callback/vipotomatis     // VIP Otomatis webhook
 POST   /payment/callback/gspay           // GsPay webhook
-POST   /payment/callback/aksesbayar      // Akses Bayar webhook
+
+// Manual Deposits
+POST   /payment/deposit/manual           // Initiate manual deposit
+POST   /payment/deposit/proof/upload     // Upload payment proof
+GET    /payment/deposit/info/:method     // Get payment details (bank account, QRIS, etc)
+
+// Withdrawals
+POST   /payment/withdraw/auto            // Initiate auto withdrawal (PGA)
+POST   /payment/withdraw/manual          // Initiate manual withdrawal (admin review)
+POST   /payment/withdraw/callback        // PGA withdrawal callback
+
+// Status & Management
 GET    /payment/status/:transactionId    // Check transaction status
-PUT    /payment/deposit/:id/confirm      // Admin approve deposit
-PUT    /payment/deposit/:id/reject       // Admin reject deposit
-PUT    /payment/withdraw/:id/confirm     // Admin approve withdrawal
+
+// Admin Actions
+PUT    /payment/deposit/:id/approve      // Admin approve manual deposit
+PUT    /payment/deposit/:id/reject       // Admin reject manual deposit
+PUT    /payment/withdraw/:id/approve     // Admin approve withdrawal (+ choose method)
+                                          // body: { method: 'pga_auto' | 'manual_transfer', gateway?: 'vipotomatis' | 'gspay' }
 PUT    /payment/withdraw/:id/reject      // Admin reject withdrawal
+PUT    /payment/withdraw/:id/complete    // Admin mark manual transfer as completed
+GET    /payment/pending                  // Get pending transactions (admin)
+
+// Admin Settings
+GET    /payment/settings/pulsa-rate      // Get current pulsa rate
+PUT    /payment/settings/pulsa-rate      // Update pulsa rate (body: { rate: 0.8 })
+GET    /payment/settings/deposit-methods // Get all deposit methods status
+PUT    /payment/settings/deposit-methods // Toggle deposit methods
+                                          // body: { qris_auto: true, qris_manual: false, bank_transfer: true, ewallet: false, pulsa: true }
+GET    /payment/settings/auto-withdrawal-provider  // Get current auto WD provider
+PUT    /payment/settings/auto-withdrawal-provider  // Set auto WD provider
+                                                     // body: { provider: 'vipotomatis' | 'gspay' }
+
+// Payment Accounts Management (Bank, QRIS, E-Wallet, Pulsa)
+GET    /payment/accounts                 // Get all payment accounts
+GET    /payment/accounts/active          // Get active payment accounts only
+GET    /payment/accounts/:id             // Get specific payment account
+POST   /payment/accounts                 // Create new payment account
+PUT    /payment/accounts/:id             // Update payment account
+PUT    /payment/accounts/:id/toggle      // Toggle active/inactive
+DELETE /payment/accounts/:id             // Delete payment account
+```
+
+**Example Payment Account API Usage:**
+
+```typescript
+// Create Bank Account
+POST /payment/accounts
+{
+  "type": "bank",
+  "name": "BCA - ABCD",
+  "active": true,
+  "bank_name": "BCA",
+  "bank_code": "014",
+  "account_number": "0123456",
+  "account_holder": "ABCD"
+}
+
+// Create E-Wallet Account
+POST /payment/accounts
+{
+  "type": "ewallet",
+  "name": "OVO - Payment",
+  "active": true,
+  "ewallet_provider": "OVO",
+  "ewallet_number": "081234567890",
+  "ewallet_name": "Payment Account"
+}
+
+// Toggle Account On/Off
+PUT /payment/accounts/123/toggle
+// Response: { id: 123, active: false }
 ```
 
 **Critical Flows:**
 
-**Deposit Flow:**
+**Deposit Flow Type 1: Automated (PGA with Callback)**
 ```
-1. User request deposit (amount, method)
-2. Create transaction (status: pending)
-3. Call payment gateway API
-4. Receive callback from gateway
-5. Validate signature & idempotency
-6. Update transaction (status: success)
-7. Call Game Proxy → depositMember()
-8. Update user balance in DB
-9. Invalidate balance cache
-10. Send notification to user
+Use Case: QRIS Automated via GsPay or VIP Otomatis
+
+1. User select deposit method: "QRIS Automated"
+2. User input amount
+3. Create transaction (status: pending, type: deposit_automated)
+4. Call payment gateway API (GsPay or VIP Otomatis)
+5. Gateway returns QRIS code/image
+6. Display QRIS to user (scan & pay)
+7. User pays via mobile banking
+   ↓
+8. Payment gateway sends callback/webhook to our API
+9. Validate callback:
+   - Signature verification
+   - Idempotency check (prevent double processing)
+   - Amount verification
+10. Update transaction (status: success)
+11. Call Game Proxy → depositMember() (sync to game)
+12. Update user balance in DB
+13. Invalidate balance cache
+14. Send notification to user
+15. Auto-redirect user to success page
+
+⏱️ Processing Time: INSTANT (1-30 seconds after payment)
+✅ No admin action required
 ```
 
-**Withdraw Flow:**
+**Deposit Flow Type 2: Manual (Admin Approval Required)**
 ```
+Use Case: QRIS Manual, Bank Transfer, E-Wallet, Pulsa
+
+1. User select deposit method: 
+- "QRIS Manual" 
+   - "Bank Transfer (BCA, Mandiri, BRI, dll)"
+   - "E-Wallet (OVO, Dana, GoPay, dll)"
+   - "Pulsa (Telkomsel, XL, Indosat, dll)"
+2. User input amount
+3. System shows payment details:
+   - For Bank: Bank name, Account number, Account holder
+   - For QRIS Manual: Static QRIS image/code
+   - For E-Wallet: E-wallet number
+   - For Pulsa: Pulsa number + **Rate info**
+     
+     **Pulsa Rate Calculation Example:**
+     ```
+     User inputs: 100,000 (pulsa nominal)
+     Current rate: 0.8 (from settings)
+     
+     Display to user:
+     ┌─────────────────────────────────┐
+     │ Pulsa Deposit                   │
+     │                                 │
+     │ Pulsa Amount:    Rp 100,000     │
+     │ Conversion Rate: 0.8 (80%)      │
+     │ You will receive: Rp 80,000     │
+     │                                 │
+     │ Send to: 081234567890           │
+     └─────────────────────────────────┘
+     
+     Calculation: 100,000 × 0.8 = 80,000
+     ```
+4. User makes payment externally
+5. User upload payment proof (screenshot/photo)
+6. Create transaction (status: pending, type: deposit_manual)
+7. Save payment proof to storage (S3)
+   ↓
+8. Admin receives notification (new pending deposit)
+9. Admin reviews:
+   - Check payment proof
+   - Verify amount
+   - Verify sender info
+10. Admin action:
+    APPROVE:
+      → Update transaction (status: success)
+      → Call Game Proxy → depositMember()
+      → Update user balance
+      → Invalidate cache
+      → Send notification to user
+    
+    REJECT:
+      → Update transaction (status: failed)
+      → Add rejection reason
+      → Send notification to user
+
+⏱️ Processing Time: 5 minutes - 24 hours (depends on admin availability)
+⚠️ Requires admin review & approval
+```
+
+**Database Schema for Deposits:**
+```sql
+-- Enhanced transactions table
+CREATE TABLE transactions (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(id),
+  type transaction_type, -- deposit_automated, deposit_manual, withdraw
+  
+  -- Amounts
+  amount DECIMAL(15,2) NOT NULL,
+  
+  -- Status
+  status transaction_status DEFAULT 'pending',
+  
+  -- Payment Details
+  payment_method VARCHAR(50), -- qris_auto, qris_manual, bank_transfer, ewallet, pulsa
+  payment_gateway VARCHAR(50), -- gspay, vipotomatis, manual
+  
+  -- For Automated Deposits
+  gateway_ref_id VARCHAR(100), -- Reference from payment gateway
+  gateway_response JSONB, -- Full callback response
+  qris_code TEXT, -- QRIS string/URL
+  
+  -- For Manual Deposits
+  payment_proof_url TEXT, -- S3 URL of uploaded proof
+  bank_account_name VARCHAR(100), -- User's bank account name (for verification)
+  bank_account_number VARCHAR(50), -- User's bank account number
+  payment_timestamp TIMESTAMP, -- When user claims they paid
+  
+  -- For Pulsa Deposits (with rate conversion)
+  pulsa_amount DECIMAL(15,2), -- Original pulsa amount
+  pulsa_rate DECIMAL(3,2), -- Rate applied (0.1 - 1.0)
+  final_amount DECIMAL(15,2), -- Calculated amount after rate (pulsa_amount * pulsa_rate)
+  
+  -- Approval
+  admin_id BIGINT REFERENCES admins(id),
+  approved_at TIMESTAMP,
+  rejection_reason TEXT,
+  
+  -- Metadata
+  notes TEXT,
+  metadata JSONB,
+  
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_transactions_user_id ON transactions(user_id);
+CREATE INDEX idx_transactions_status ON transactions(status);
+CREATE INDEX idx_transactions_type ON transactions(type);
+CREATE INDEX idx_transactions_payment_method ON transactions(payment_method);
+```
+
+
+**Withdrawal Flow Type 1: Auto Withdrawal (PGA)**
+```
+Use Case: Automated withdrawal via VIP Otomatis or GsPay
+
 1. User request withdraw (amount)
 2. Check user balance (cache + DB)
-3. Call Game Proxy → withdrawMember()
-4. If success: Create transaction (pending)
-5. Admin approval OR VIP Otomatis auto-process
-6. Disburse to user bank account
-7. Update transaction (status: success)
-8. Update user balance
-9. Invalidate cache
-10. Send notification
+3. Validate minimum withdrawal amount
+4. Call Game Proxy → withdrawMember() (pull from game)
+5. If success: Create transaction (status: pending, type: withdraw_auto)
+6. Call PGA API (VIP Otomatis or GsPay) for disbursement
+7. PGA processes payment automatically
+8. Receive callback/webhook from PGA
+9. Validate callback
+10. Update transaction (status: success)
+11. Update user balance in DB
+12. Invalidate cache
+13. Send notification to user
+
+⏱️ Processing Time: INSTANT (1-5 minutes)
+✅ No admin action required
+💰 May have PGA fees
 ```
+
+**Withdrawal Flow Type 2: Manual Withdrawal (Admin Controlled)**
+```
+Use Case: Admin review and choose disbursement method
+
+1. User request withdraw (amount)
+2. Check user balance (cache + DB)
+3. Validate minimum withdrawal amount
+4. Call Game Proxy → withdrawMember() (pull from game)
+5. If success: Create transaction (status: pending, type: withdraw_manual)
+6. Save user bank details for withdrawal
+   ↓
+7. Admin receives notification (new withdrawal request)
+8. Admin reviews:
+   - Check user balance history
+   - Verify bank details
+   - Check for suspicious activity
+   
+9. Admin decision:
+   
+   ┌─── APPROVE ───┐
+   │               │
+   │  Admin chooses disbursement method:
+   │  
+   │  Option A: Send via PGA (Automated)
+   │    → Call VIP Otomatis or GsPay API
+   │    → Automatic disbursement
+   │    → Receive callback
+   │    → Update transaction (status: success)
+   │    → Send notification
+   │    ⏱️ Processing: 1-5 minutes
+   │    💰 PGA fees apply
+   │  
+   │  Option B: Send Manual (Bank Transfer)
+   │    → Admin marks as "processing"
+   │    → Admin manually transfers via bank
+   │    → Admin uploads transfer proof (optional)
+   │    → Admin marks as "completed"
+   │    → Update transaction (status: success)
+   │    → Send notification
+   │    ⏱️ Processing: varies (same day - next day)
+   │    💰 No PGA fees
+   │
+   └───────────────┘
+   
+   OR
+   
+   ┌─── REJECT ────┐
+   │               │
+   │  → Return balance to user (if already withdrawn from game)
+   │  → Call Game Proxy → depositMember() (return to game)
+   │  → Update transaction (status: rejected)
+   │  → Add rejection reason
+   │  → Send notification to user
+   │
+   └───────────────┘
+
+⏱️ Processing Time: Varies (depends on admin + method)
+⚠️ Requires admin review
+💡 Admin can choose cheaper manual method or faster PGA
+```
+
+**Enhanced Database Schema for Withdrawals:**
+```sql
+-- Add withdrawal-specific fields to transactions table
+ALTER TABLE transactions ADD COLUMN IF NOT EXISTS
+  withdrawal_method VARCHAR(20), -- 'auto_pga', 'manual_pga', 'manual_transfer'
+  disbursement_status VARCHAR(20), -- 'pending', 'processing', 'completed', 'failed'
+  disbursement_proof_url TEXT, -- For manual transfers
+  pga_reference_id VARCHAR(100), -- Reference from PGA
+  pga_fees DECIMAL(15,2), -- Fees charged by PGA
+  disbursed_at TIMESTAMP, -- When money was sent
+  admin_notes TEXT; -- Admin notes for manual processing
+```
+
+**Admin Panel Withdrawal Approval UI:**
+```typescript
+// Example withdrawal approval interface
+interface WithdrawalApprovalAction {
+  transactionId: number;
+  action: 'approve' | 'reject';
+  
+  // If approved
+  disbursementMethod?: 'pga_auto' | 'manual_transfer';
+  pga_gateway?: 'vipotomatis' | 'gspay'; // If using PGA
+  
+  // If rejected
+  rejectionReason?: string;
+  
+  // Optional
+  adminNotes?: string;
+}
+```
+
 
 **Database Tables:**
 - `transactions` (write/read)
@@ -692,6 +1325,1038 @@ GET    /analytics/trends                // Trends & insights
 ```
 
 ---
+
+### 8. Togel Service (NEW)
+
+**Responsibilities:**
+- Togel game integration via DominicEngineAPI
+- In-game panel page for user to play
+- Betting management
+- Results tracking
+- Winnings calculation
+
+**Integration:**
+- DominicEngineAPI togel endpoints
+- Real-time betting interface
+- Live results display
+
+**API Endpoints:**
+```typescript
+GET    /togel/games                     // List available togel games
+GET    /togel/markets                   // Get current markets
+POST   /togel/bet                       // Place bet
+GET    /togel/results                   // Get latest results
+GET    /togel/history/:userId           // User betting history
+GET    /togel/winnings/:userId          // User winnings
+```
+
+**Frontend Pages:**
+- `/togel` - Main togel game page (in-game panel)
+- Betting interface with number selection
+- Live draw results
+- Betting history
+- Winnings tracker
+
+**Database Tables:**
+```sql
+CREATE TABLE togel_bets (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(id),
+  game_id VARCHAR(50),
+  market_code VARCHAR(20), -- 4D, 3D, 2D, dll
+  numbers VARCHAR(50), -- Betting numbers
+  bet_amount DECIMAL(15,2),
+  win_amount DECIMAL(15,2) DEFAULT 0,
+  status VARCHAR(20), -- pending, win, lose
+  draw_date DATE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_togel_bets_user ON togel_bets(user_id);
+CREATE INDEX idx_togel_bets_status ON togel_bets(status);
+```
+
+---
+
+### 9. Lotre Service (NEW)
+
+**Responsibilities:**
+- Lottery game integration via DominicEngineAPI
+- In-game lottery panel page
+- Ticket purchase management
+- Draw results tracking
+- Prize distribution
+
+**Integration:**
+- DominicEngineAPI lottery endpoints
+- Automated draw system
+- Prize payout integration
+
+**API Endpoints:**
+```typescript
+GET    /lotre/draws                     // List upcoming/active draws
+GET    /lotre/draw/:id                  // Get draw details
+POST   /lotre/ticket/buy                // Purchase lottery ticket
+GET    /lotre/tickets/:userId           // User's tickets
+GET    /lotre/results/:drawId           // Draw results
+GET    /lotre/winners/:drawId           // Draw winners
+```
+
+**Frontend Pages:**
+- `/lotre` - Main lottery page (in-game panel)
+- Ticket purchase interface
+- Current draws display
+- Results announcement
+- Winning tickets tracking
+
+**Database Tables:**
+```sql
+CREATE TABLE lotre_draws (
+  id SERIAL PRIMARY KEY,
+  draw_code VARCHAR(50) UNIQUE,
+  draw_name VARCHAR(100),
+  ticket_price DECIMAL(15,2),
+  prize_pool DECIMAL(15,2),
+  draw_date TIMESTAMP,
+  status VARCHAR(20), -- open, closed, drawn
+  winning_numbers JSONB, -- Array of winning numbers
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE lotre_tickets (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(id),
+  draw_id INT REFERENCES lotre_draws(id),
+  ticket_number VARCHAR(50) UNIQUE,
+  numbers JSONB, -- User selected numbers
+  purchase_amount DECIMAL(15,2),
+  win_amount DECIMAL(15,2) DEFAULT 0,
+  status VARCHAR(20), -- active, win, lose
+  purchased_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_lotre_tickets_user ON lotre_tickets(user_id);
+CREATE INDEX idx_lotre_tickets_draw ON lotre_tickets(draw_id);
+CREATE INDEX idx_lotre_tickets_status ON lotre_tickets(status);
+```
+
+---
+
+### 10. Luckydraw Service (NEW)
+
+**Responsibilities:**
+- Lucky draw/spin reward system for members
+- In-panel reward page
+- Daily/weekly spin mechanics
+- Prize management
+- Claim rewards
+
+**Integration:**
+- DominicEngineAPI luckydraw endpoints
+- Spin eligibility checking (based on deposits, turnover, etc)
+- Automated prize distribution
+
+**API Endpoints:**
+```typescript
+GET    /luckydraw/eligibility           // Check if user can spin
+GET    /luckydraw/prizes                // List available prizes
+POST   /luckydraw/spin                  // Execute spin
+POST   /luckydraw/claim/:prizeId        // Claim won prize
+GET    /luckydraw/history/:userId       // User spin history
+GET    /luckydraw/settings              // Admin: prize settings
+PUT    /luckydraw/settings              // Admin: update prizes
+```
+
+**Frontend Pages:**
+- `/luckydraw` - Lucky draw page (in-panel)
+- Spin wheel interface
+- Prize showcase
+- Spin history
+- Claim rewards interface
+
+**Features:**
+- Daily spin (free for eligible users)
+- Spin based on deposit amount
+- Spin based on turnover
+- Multiple prize tiers
+- Instant claim or accumulate
+
+**Database Tables:**
+```sql
+CREATE TABLE luckydraw_prizes (
+  id SERIAL PRIMARY KEY,
+  prize_name VARCHAR(100),
+  prize_type VARCHAR(20), -- bonus, free_spin, cashback, dll
+  prize_value DECIMAL(15,2),
+  probability DECIMAL(5,2), -- Winning probability (0-100)
+  active BOOLEAN DEFAULT TRUE,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE luckydraw_spins (
+  id BIGSERIAL PRIMARY KEY,
+  user_id BIGINT REFERENCES users(id),
+  prize_id INT REFERENCES luckydraw_prizes(id),
+  prize_claimed BOOLEAN DEFAULT FALSE,
+  claimed_at TIMESTAMP,
+  spin_type VARCHAR(20), -- daily_free, deposit_bonus, turnover_reward
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE luckydraw_eligibility (
+  user_id BIGINT PRIMARY KEY REFERENCES users(id),
+  daily_spin_available BOOLEAN DEFAULT TRUE,
+  last_daily_spin TIMESTAMP,
+  bonus_spins_available INT DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_luckydraw_spins_user ON luckydraw_spins(user_id);
+CREATE INDEX idx_luckydraw_spins_claimed ON luckydraw_spins(prize_claimed);
+```
+
+**Eligibility Rules:**
+```typescript
+// Example eligibility logic
+class LuckydrawEligibilityService {
+  async checkEligibility(userId: number) {
+    const user = await this.getUserEligibility(userId);
+    
+    return {
+      canSpin: user.daily_spin_available || user.bonus_spins_available > 0,
+      dailyAvailable: user.daily_spin_available,
+      bonusSpins: user.bonus_spins_available,
+      nextDailySpin: this.getNextDailySpinTime(user.last_daily_spin)
+    };
+  }
+  
+  async grantBonusSpin(userId: number, reason: string) {
+    // Grant bonus spin based on:
+    // - Deposit amount (e.g., 1 spin per 100k deposit)
+    // - Turnover milestone (e.g., 1 spin per 1M turnover)
+    // - Referral rewards
+    await this.incrementBonusSpins(userId, 1, reason);
+  }
+}
+```
+
+---
+
+## 🎯 Updated Microservices Count
+
+Total services: **10 microservices**
+
+1. Auth Service
+2. User Service
+3. Game Proxy Service
+4. Payment Service
+5. Transaction Service
+6. Referral Service
+7. Analytics Service
+8. **Togel Service** ← NEW
+9. **Lotre Service** ← NEW
+10. **Luckydraw Service** ← NEW
+
+---
+
+## 🎮 DominicEngineAPI Extended Integration
+
+### Togel API Integration
+```typescript
+// game-proxy-service/src/dominic/togel.client.ts
+export class TogelClient extends DominicEngineAPI {
+  async getTogelMarkets() {
+    return this.sendRequest('API/togel/markets/', {});
+  }
+  
+  async placeBet(username: string, market: string, numbers: string, amount: number) {
+    return this.sendRequest('API/togel/bet/', {
+      user_code: username,
+      market_code: market,
+      numbers: numbers,
+      amount: amount
+    });
+  }
+  
+  async getResults(date: string) {
+    return this.sendRequest('API/togel/results/', {
+      draw_date: date
+    });
+  }
+}
+```
+
+### Lotre API Integration
+```typescript
+// game-proxy-service/src/dominic/lotre.client.ts
+export class LotreClient extends DominicEngineAPI {
+  async getActiveDraws() {
+    return this.sendRequest('API/lotre/draws/', {
+      status: 'open'
+    });
+  }
+  
+  async purchaseTicket(username: string, drawId: string, numbers: number[]) {
+    return this.sendRequest('API/lotre/ticket/buy/', {
+      user_code: username,
+      draw_id: drawId,
+      selected_numbers: numbers
+    });
+  }
+  
+  async getDrawResults(drawId: string) {
+    return this.sendRequest('API/lotre/results/', {
+      draw_id: drawId
+    });
+  }
+}
+```
+
+### Luckydraw API Integration
+```typescript
+// game-proxy-service/src/dominic/luckydraw.client.ts
+export class LuckydrawClient extends DominicEngineAPI {
+  async getPrizePool() {
+    return this.sendRequest('API/luckydraw/prizes/', {});
+  }
+  
+  async executeSpin(username: string) {
+    return this.sendRequest('API/luckydraw/spin/', {
+      user_code: username
+    });
+  }
+  
+  async claimPrize(username: string, prizeId: string) {
+    return this.sendRequest('API/luckydraw/claim/', {
+      user_code: username,
+      prize_id: prizeId
+    });
+  }
+}
+```
+
+---
+
+## 🌐 Domain Alias Management (Cloudflare Integration)
+
+### Overview
+
+Domain alias management menggunakan **Cloudflare API** untuk automated DNS configuration. Admin dapat menambahkan domain/subdomain melalui panel, dan system akan otomatis setup DNS records via Cloudflare API.
+
+### Architecture Flow
+
+```
+Admin Panel → Domain Service → Cloudflare API → DNS Setup
+                    ↓
+              Check if domain/subdomain
+                    ↓
+        ├─ Main Domain ─→ Create Zone → Get Nameservers
+        └─ Subdomain ───→ Check parent zone exists
+                           ├─ Yes → Add A/CNAME record
+                           └─ No  → Create parent zone first → Add subdomain record
+```
+
+### Database Schema Enhancement
+
+```sql
+-- Enhanced domain_aliases table
+CREATE TABLE domain_aliases (
+  id SERIAL PRIMARY KEY,
+  domain VARCHAR(255) UNIQUE NOT NULL,
+  is_subdomain BOOLEAN DEFAULT FALSE,
+  parent_domain VARCHAR(255), -- Null for main domains
+  
+  status domain_status DEFAULT 'pending',
+  
+  -- Cloudflare Integration
+  cloudflare_zone_id VARCHAR(100),
+  cloudflare_nameservers JSONB, -- ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+  cloudflare_status VARCHAR(50), -- 'pending', 'active', 'failed'
+  cloudflare_record_id VARCHAR(100), -- For subdomain A/CNAME record
+  
+  -- Target server
+  target_ip INET, -- IP address to point to (your VPS)
+  
+  -- Nginx Config  
+  nginx_config_path TEXT,
+  nginx_status VARCHAR(20), -- 'pending', 'configured', 'failed'
+  
+  -- Metadata
+  created_by BIGINT REFERENCES admins(id),
+  notes TEXT,
+  
+  created_at TIMESTAMP DEFAULT NOW(),
+  updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX idx_domain_aliases_status ON domain_aliases(status);
+CREATE INDEX idx_domain_aliases_parent ON domain_aliases(parent_domain);
+CREATE INDEX idx_domain_aliases_cf_zone ON domain_aliases(cloudflare_zone_id);
+```
+
+### Workflow Detail
+
+#### **Flow 1: Add Main Domain (example.com)**
+
+```
+1. Admin inputs: example.com
+   ↓
+2. System validates domain format
+   ↓
+3. Check if subdomain
+   → Extract: is_subdomain = FALSE
+   ↓
+4. Call Cloudflare API: Create Zone
+   POST https://api.cloudflare.com/client/v4/zones
+   Body: {
+     "name": "example.com",
+     "type": "full"
+   }
+   ↓
+5. Cloudflare Response:
+   {
+     "result": {
+       "id": "zone_id_abc123",
+       "name": "example.com",
+       "status": "pending",
+       "name_servers": [
+         "ns1.cloudflare.com",
+         "ns2.cloudflare.com"
+       ]
+     }
+   }
+   ↓
+6. Save to database:
+   - cloudflare_zone_id: "zone_id_abc123"
+   - cloudflare_nameservers: ["ns1.cloudflare.com", "ns2.cloudflare.com"]
+   - status: 'pending'
+   ↓
+7. Add DNS A Record (point domain to VPS)
+   POST https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records
+   Body: {
+     "type": "A",
+     "name": "@", // Root domain
+     "content": "217.216.72.31", // Your VPS IP
+     "ttl": 1, // Auto
+     "proxied": true // Cloudflare proxy enabled
+   }
+   ↓
+8. Display to Admin:
+   ╔══════════════════════════════════════╗
+   ║ Domain Added Successfully!           ║
+   ║                                      ║
+   ║ Domain: example.com                  ║
+   ║ Status: Pending Nameserver Setup     ║
+   ║                                      ║
+   ║ Nameservers (paste to your domain   ║
+   ║ registrar):                          ║
+   ║ ├─ ns1.cloudflare.com                ║
+   ║ └─ ns2.cloudflare.com                ║
+   ║                                      ║
+   ║ DNS propagation may take 24-48 hours ║
+   ╚══════════════════════════════════════╝
+   ↓
+9. Admin copies nameservers → paste to domain registrar (GoDaddy, Namecheap, dll)
+   ↓
+10. Background job checks zone status every hour:
+    GET https://api.cloudflare.com/client/v4/zones/{zone_id}
+    
+    If status = "active":
+      → Update domain_aliases.status = 'active'
+      → Generate Nginx config
+      → Reload Nginx
+```
+
+#### **Flow 2: Add Subdomain (sub.example.com)**
+
+```
+1. Admin inputs: sub.example.com
+   ↓
+2. System validates domain format
+   ↓
+3. Check if subdomain
+   → Extract parent domain: example.com
+   → is_subdomain = TRUE
+   ↓
+4. Check if parent zone exists in Cloudflare
+   Query DB: SELECT cloudflare_zone_id FROM domain_aliases 
+             WHERE domain = 'example.com' AND status = 'active'
+   
+   ├─ Case A: Parent zone EXISTS
+   │   ↓
+   │   5a. Use existing zone_id
+   │   ↓
+   │   6a. Add DNS A Record for subdomain
+   │       POST https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records
+   │       Body: {
+   │         "type": "A",
+   │         "name": "sub", // Subdomain prefix only
+   │         "content": "217.216.72.31",
+   │         "ttl": 1,
+   │         "proxied": true
+   │       }
+   │   ↓
+   │   7a. Save to database:
+   │       - domain: 'sub.example.com'
+   │       - parent_domain: 'example.com'
+   │       - is_subdomain: TRUE
+   │       - cloudflare_zone_id: (parent's zone_id)
+   │       - cloudflare_record_id: "record_id_xyz789"
+   │       - status: 'active' (immediately active!)
+   │   ↓
+   │   8a. Generate Nginx config
+   │   ↓
+   │   9a. Reload Nginx
+   │   ↓
+   │   10a. Display success:
+   │       ╔══════════════════════════════════════╗
+   │       ║ Subdomain Added Successfully!        ║
+   │       ║                                      ║
+   │       ║ Subdomain:  sub.example.com          ║
+   │       ║ Status:     Active ✅                 ║
+   │       ║ IP:         217.216.72.31            ║
+   │       ║                                      ║
+   │       ║ DNS propagation: 1-5 minutes         ║
+   │       ╚══════════════════════════════════════╝
+   │
+   └─ Case B: Parent zone DOES NOT EXIST
+       ↓
+       5b. Create parent zone FIRST
+           (Follow Flow 1 steps 4-7)
+       ↓
+       6b. Then add subdomain record
+           (Same as steps 6a-10a above)
+       ↓
+       7b. Display to admin:
+           ╔══════════════════════════════════════╗
+           ║ Parent Domain Setup Required         ║
+           ║                                      ║
+           ║ Created: example.com                 ║
+           ║ Nameservers:                         ║
+           ║ ├─ ns1.cloudflare.com                ║
+           ║ └─ ns2.cloudflare.com                ║
+           ║                                      ║
+           ║ Subdomain: sub.example.com           ║
+           ║ Status: Pending (waiting for NS      ║
+           ║         propagation)                 ║
+           ║                                      ║
+           ║ Please update nameservers at your    ║
+           ║ domain registrar first!              ║
+           ╚══════════════════════════════════════╝
+```
+
+### API Service Implementation
+
+**Domain Service (NestJS):**
+
+```typescript
+// domain-service/src/cloudflare/cloudflare.client.ts
+import axios from 'axios';
+
+export class CloudflareClient {
+  private readonly apiToken: string;
+  private readonly baseUrl = 'https://api.cloudflare.com/client/v4';
+  
+  constructor() {
+    this.apiToken = process.env.CLOUDFL ARE_API_TOKEN;
+  }
+  
+  // Create Zone (for main domain)
+  async createZone(domain: string) {
+    const response = await axios.post(
+      `${this.baseUrl}/zones`,
+      {
+        name: domain,
+        type: 'full',
+        jump_start: true // Auto-scan DNS records
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    return {
+      zoneId: response.data.result.id,
+      nameServers: response.data.result.name_servers,
+      status: response.data.result.status
+    };
+  }
+  
+  // Add DNS A Record
+  async addARecord(zoneId: string, name: string, ip: string, proxied = true) {
+    const response = await axios.post(
+      `${this.baseUrl}/zones/${zoneId}/dns_records`,
+      {
+        type: 'A',
+        name: name, // '@' for root, 'sub' for subdomain
+        content: ip,
+        ttl: 1, // Auto
+        proxied: proxied
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    
+    return {
+      recordId: response.data.result.id,
+      name: response.data.result.name,
+      content: response.data.result.content
+    };
+  }
+  
+  // Check Zone Status
+  async getZoneStatus(zoneId: string) {
+    const response = await axios.get(
+      `${this.baseUrl}/zones/${zoneId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`
+        }
+      }
+    );
+    
+    return response.data.result.status; // 'pending' or 'active'
+  }
+  
+  // List DNS Records (untuk verify)
+  async listDNSRecords(zoneId: string) {
+    const response = await axios.get(
+      `${this.baseUrl}/zones/${zoneId}/dns_records`,
+      {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`
+        }
+      }
+    );
+    
+    return response.data.result;
+  }
+  
+  // Delete DNS Record (untuk remove subdomain)
+  async deleteDNSRecord(zoneId: string, recordId: string) {
+    await axios.delete(
+      `${this.baseUrl}/zones/${zoneId}/dns_records/${recordId}`,
+      {
+        headers: {
+          'Authorization': `Bearer ${this.apiToken}`
+        }
+      }
+    );
+  }
+}
+```
+
+**Domain Service Controller:**
+
+```typescript
+// domain-service/src/domain/domain.controller.ts
+import { Controller, Post, Get, Delete, Body, Param } from '@nestjs/common';
+import { DomainService } from './domain.service';
+
+@Controller('domains')
+export class DomainController {
+  constructor(private readonly domainService: DomainService) {}
+  
+  @Post('add')
+  async addDomain(@Body() dto: AddDomainDto) {
+    // Extract domain info
+    const domainInfo = this.parseDomain(dto.domain);
+    
+    if (domainInfo.isSubdomain) {
+      // Subdomain logic
+      return await this.domainService.addSubdomain(
+        dto.domain,
+        domainInfo.parentDomain,
+        dto.targetIp
+      );
+    } else {
+      // Main domain logic
+      return await this.domainService.addMainDomain(
+        dto.domain,
+        dto.targetIp
+      );
+    }
+  }
+  
+  @Get('status/:id')
+  async checkStatus(@Param('id') id: number) {
+    return await this.domainService.checkDomainStatus(id);
+  }
+  
+  @Delete(':id')
+  async removeDomain(@Param('id') id: number) {
+    return await this.domainService.removeDomain(id);
+  }
+  
+  private parseDomain(domain: string) {
+    const parts = domain.split('.');
+    
+    if (parts.length > 2) {
+      // Subdomain (sub.example.com)
+      return {
+        isSubdomain: true,
+        subdomain: parts.slice(0, -2).join('.'),
+        parentDomain: parts.slice(-2).join('.')
+      };
+    } else {
+      // Main domain (example.com)
+      return {
+        isSubdomain: false,
+        parentDomain: null
+      };
+    }
+  }
+}
+```
+
+### Nginx Configuration Generation
+
+Setelah DNS setup, system auto-generate Nginx config:
+
+```nginx
+# /etc/nginx/sites-available/sub.example.com.conf
+server {
+    listen 80;
+    listen [::]:80;
+    server_name sub.example.com;
+    
+    # Cloudflare SSL/TLS (Flexible/Full)
+    # Or use cert-manager for Let's Encrypt
+    
+    location / {
+        proxy_pass http://localhost:3000; # Next.js frontend
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    location /api {
+        proxy_pass http://localhost:4000; # API Gateway
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### Background Jobs
+
+**Cron job untuk check zone status:**
+
+```typescript
+// domain-service/src/jobs/domain-status-checker.job.ts
+import { Injectable } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+
+@Injectable()
+export class DomainStatusCheckerJob {
+  constructor(
+    private readonly cloudflareClient: CloudflareClient,
+    private readonly domainRepository: DomainRepository
+  ) {}
+  
+  @Cron(CronExpression.EVERY_HOUR) // Check every hour
+  async checkPendingDomains() {
+    const pendingDomains = await this.domainRepository.findPending();
+    
+    for (const domain of pendingDomains) {
+      try {
+        const status = await this.cloudflareClient.getZoneStatus(
+          domain.cloudflareZoneId
+        );
+        
+        if (status === 'active') {
+          // Update domain status
+          await this.domainRepository.updateStatus(domain.id, 'active');
+          
+          // Generate Nginx config
+          await this.generateNginxConfig(domain);
+          
+          // Reload Nginx
+          await this.reloadNginx();
+          
+          // Send notification to admin
+          await this.notifyAdmin(domain, 'activated');
+        }
+      } catch (error) {
+        console.error(`Error checking domain ${domain.domain}:`, error);
+      }
+    }
+  }
+  
+  private async generateNginxConfig(domain: DomainAlias) {
+    // Generate nginx config file
+    const config = this.getNginxTemplate(domain);
+    const configPath = `/etc/nginx/sites-available/${domain.domain}.conf`;
+    
+    await fs.writeFile(configPath, config);
+    await fs.symlink(
+      configPath,
+      `/etc/nginx/sites-enabled/${domain.domain}.conf`
+    );
+    
+    // Update database
+    await this.domainRepository.update(domain.id, {
+      nginxConfigPath: configPath,
+      nginxStatus: 'configured'
+    });
+  }
+  
+  private async reloadNginx() {
+    // Test config first
+    await exec('nginx -t');
+    
+    // Reload
+    await exec('systemctl reload nginx');
+  }
+}
+```
+
+### Admin Panel UI
+
+**Add Domain Form:**
+
+```typescript
+// admin-panel/src/components/domains/AddDomainForm.tsx
+export function AddDomainForm() {
+  const [domain, setDomain] = useState('');
+  const [result, setResult] = useState(null);
+  
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    const response = await fetch('/api/domains/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        domain: domain,
+        targetIp: '217.216.72.31' // Your VPS IP
+      })
+    });
+    
+    const data = await response.json();
+    setResult(data);
+  };
+  
+  return (
+    <div>
+      <form onSubmit={handleSubmit}>
+        <input 
+          type="text"
+          placeholder="example.com or sub.example.com"
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+        />
+        <button type="submit">Add Domain</button>
+      </form>
+      
+      {result && (
+        <div className="result-card">
+          <h3>Domain Added!</h3>
+          <p>Domain: {result.domain}</p>
+          <p>Status: {result.status}</p>
+          
+          {result.nameservers && (
+            <div className="nameservers">
+              <h4>Nameservers (paste to your registrar):</h4>
+              <ul>
+                {result.nameservers.map(ns => (
+                  <li key={ns}>
+                    {ns}
+                    <button onClick={() => navigator.clipboard.writeText(ns)}>
+                      Copy
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          
+          {result.isSubdomain && result.status === 'active' && (
+            <div className="success">
+              ✅ Subdomain is active! DNS propagation: 1-5 minutes
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+### Key Features
+
+1. ✅ **Automated DNS Setup** - No manual DNS configuration
+2. ✅ **Nameserver Display** - Auto-show CF nameservers to admin
+3. ✅ **Subdomain Intelligence** - Auto-detect & handle subdomains
+4. ✅ **Parent Zone Check** - Verify parent domain exists before adding subdomain
+5. ✅ **Background Monitoring** - Auto-check zone activation status
+6. ✅ **Nginx Auto-Config** - Generate & reload Nginx configs
+7. ✅ **Cloudflare Proxy** - Enable DDoS protection & CDN
+8. ✅ **Status Tracking** - Real-time domain status updates
+
+### Settings Required
+
+```sql
+-- Cloudflare API credentials in settings table
+INSERT INTO settings (key, value, category) VALUES
+('cloudflare.api_token', '"your_cf_api_token_here"', 'dns'),
+('cloudflare.account_id', '"your_cf_account_id"', 'dns'),
+('cloudflare.default_proxied', 'true', 'dns'),
+('server.primary_ip', '"217.216.72.31"', 'infrastructure');
+```
+
+---
+
+## � Localization (Bahasa Indonesia)
+
+### Language Requirements
+
+**Default Language**: **Bahasa Indonesia (id)**
+
+All user-facing interfaces (Admin Panel & Member Panel) must use Indonesian language:
+
+### Admin Panel (Bahasa Indonesia)
+```
+Dashboard → Dasbor
+Users → Pengguna
+Transactions → Transaksi
+Deposits → Deposit
+Withdrawals → Penarikan
+Pending Approval → Menunggu Persetujuan
+Approve → Setujui
+Reject → Tolak
+Settings → Pengaturan
+Payment Methods → Metode Pembayaran
+Reports → Laporan
+Analytics → Analitik
+Games → Permainan
+Referrals → Referral
+Lucky Draw → Undian Berhadiah
+```
+
+### Member Panel (Bahasa Indonesia)
+```
+Home → Beranda
+Deposit → Deposit
+Withdraw → Tarik Dana
+History → Riwayat
+Profile → Profil
+Referral → Referral
+Lucky Draw → Undian
+Balance → Saldo
+Main Balance → Saldo Utama
+Referral Balance → Saldo Referral
+Play Now → Main Sekarang
+Claim → Klaim
+Terms & Conditions → Syarat & Ketentuan
+```
+
+### Implementation (i18n)
+
+**Frontend (Next.js):**
+```typescript
+// Use next-intl or react-i18next
+
+// locales/id/common.json
+{
+  "deposit": "Deposit",
+  "withdraw": "Tarik Dana",
+  "balance": "Saldo",
+  "history": "Riwayat",
+  "approve": "Setujui",
+  "reject": "Tolak",
+  "pending": "Menunggu",
+  "success": "Berhasil",
+  "failed": "Gagal",
+  "amount": "Jumlah",
+  "payment_method": "Metode Pembayaran",
+  "bank_transfer": "Transfer Bank",
+  "qris": "QRIS",
+  "pulsa": "Pulsa",
+  "ewallet": "E-Wallet"
+}
+
+// locales/id/payment.json
+{
+  "deposit_methods": {
+    "qris_auto": "QRIS Otomatis",
+    "qris_manual": "QRIS Manual",
+    "bank_transfer": "Transfer Bank",
+    "ewallet": "E-Wallet",
+    "pulsa": "Pulsa"
+  },
+  "pulsa_conversion": "Konversi Pulsa",
+  "you_will_receive": "Anda akan menerima",
+  "upload_proof": "Upload Bukti Bayar",
+  "waiting_confirmation": "Menunggu Konfirmasi Admin"
+}
+```
+
+**Backend (NestJS):**
+```typescript
+// For API error messages and notifications
+{
+  "errors": {
+    "insufficient_balance": "Saldo tidak mencukupi",
+    "invalid_amount": "Jumlah tidak valid",
+    "payment_failed": "Pembayaran gagal",
+    "withdrawal_limit": "Melebihi batas penarikan"
+  },
+  "notifications": {
+    "deposit_success": "Deposit berhasil! Saldo Anda telah ditambahkan.",
+    "withdrawal_approved": "Penarikan Anda telah disetujui dan diproses.",
+    "withdrawal_rejected": "Penarikan Anda ditolak. Alasan: {{reason}}"
+  }
+}
+```
+
+### Date & Number Formatting
+
+**Indonesian Locale:**
+```typescript
+// Date format: DD/MM/YYYY HH:mm
+// Example: 27/11/2025 13:45
+
+// Number format: Use period (.) for thousands, comma (,) for decimals
+// Example: Rp 1.000.000,50
+
+import { format } from 'date-fns';
+import { id } from 'date-fns/locale';
+
+// Date formatting
+format(new Date(), 'dd/MM/yyyy HH:mm', { locale: id });
+
+// Currency formatting
+new Intl.NumberFormat('id-ID', {
+  style: 'currency',
+  currency: 'IDR',
+  minimumFractionDigits: 0
+}).format(100000); // Rp100.000
+```
+
+### Validation Messages (Indonesian)
+```
+- "Field wajib diisi"
+- "Format email tidak valid"
+- "Password minimal 8 karakter"
+- "Nomor telepon tidak valid"
+- "Minimal penarikan Rp 50.000"
+- "Maksimal deposit Rp 10.000.000"
+```
+
+---
+
+## �🏗️ Infrastructure Setup
+
+
 
 ## 🏗️ Infrastructure Setup
 
